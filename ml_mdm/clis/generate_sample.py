@@ -14,6 +14,9 @@ from einops import rearrange, repeat
 
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
+from pathlib import Path
+from transformers import T5ForConditionalGeneration
 from torchvision.utils import make_grid
 
 from ml_mdm import helpers, reader
@@ -22,12 +25,24 @@ from ml_mdm.language_models import factory
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Note that it is called add_arguments, not add_argument.
+# Download destination
+models = Path("models")
+
 logging.basicConfig(
     level=getattr(logging, "INFO", None),
     format="[%(asctime)s] {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s",
     datefmt="%H:%M:%S",
 )
+
+
+def download_all_models():
+    # Cache language model in the standard location
+    _ = T5ForConditionalGeneration.from_pretrained("google/flan-t5-xl")
+
+    # Download the vision models we use in the demo
+    snapshot_download("pcuenq/mdm-flickr-64", local_dir=models/"mdm-flickr-64")
+    snapshot_download("pcuenq/mdm-flickr-256", local_dir=models/"mdm-flickr-256")
+    snapshot_download("pcuenq/mdm-flickr-1024", local_dir=models/"mdm-flickr-1024")
 
 
 def dividable(n):
@@ -91,7 +106,6 @@ class GLOBAL_DATA:
     diffusion_model = None
     override_args = ""
     ckpt_name = ""
-    config_file = ""
 
 
 global_config = GLOBAL_DATA()
@@ -111,8 +125,7 @@ def get_model_type(config_file):
 
 
 def generate(
-    config_file="cc12m_64x64.yaml",
-    ckpt_name="vis_model_64x64.pth",
+    ckpt_name="mdm-flickr-64",
     prompt="a chair",
     input_template="",
     negative_prompt="",
@@ -140,28 +153,28 @@ def generate(
         negative_prompt = negative_prompt + negative_template
     print(f"Postive: {prompt} / Negative: {negative_prompt}")
 
-    if not os.path.exists(ckpt_name):
-        logging.info(f"Did not generate because {ckpt_name} does not exist")
-        return None, None, f"{ckpt_name} does not exist", None, None
+    vision_model_file = models/ckpt_name/"vis_model.pth"
+    if not os.path.exists(vision_model_file):
+        logging.info(f"Did not generate because {vision_model_file} does not exist")
+        return None, None, f"{vision_model_file} does not exist", None, None
 
     if (
-        global_config.config_file != config_file
-        or global_config.ckpt_name != ckpt_name
+        global_config.ckpt_name != ckpt_name
         or global_config.override_args != override_args
     ):
         # Identify model type
-        model_type = get_model_type(f"configs/models/{config_file}")
+        model_type = get_model_type(models/ckpt_name/"config.yaml")
         # reload the arguments
         args = get_arguments(
             shlex.split(override_args + f" --model {model_type}"),
             mode="demo",
-            additional_config_paths=[f"configs/models/{config_file}"],
+            additional_config_paths=[models/ckpt_name/"config.yaml"],
         )
         helpers.print_args(args)
 
         # setup model when the parent task changed.
+        args.vocab_file = str(models/ckpt_name/args.vocab_file)
         tokenizer, language_model, diffusion_model = setup_models(args, device)
-        vision_model_file = ckpt_name
         try:
             other_items = diffusion_model.model.load(vision_model_file)
         except Exception as e:
@@ -176,7 +189,6 @@ def generate(
         global_config.language_model = language_model
         global_config.diffusion_model = diffusion_model
         global_config.reader_config = args.reader_config
-        global_config.config_file = config_file
         global_config.ckpt_name = ckpt_name
 
     else:
@@ -287,6 +299,8 @@ def generate(
 
 
 def main(args):
+    download_all_models()
+
     # get the language model outputs
     example_texts = open("data/prompts_demo.tsv").readlines()
 
@@ -316,24 +330,14 @@ def main(args):
             with gr.Column(scale=2):
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1):
-                        config_file = gr.Dropdown(
-                            [
-                                "cc12m_64x64.yaml",
-                                "cc12m_256x256.yaml",
-                                "cc12m_1024x1024.yaml",
-                            ],
-                            value="cc12m_64x64.yaml",
-                            label="Select the config file",
-                        )
-                    with gr.Column(scale=1):
                         ckpt_name = gr.Dropdown(
                             [
-                                "vis_model_64x64.pth",
-                                "vis_model_256x256.pth",
-                                "vis_model_1024x1024.pth",
+                                "mdm-flickr-64",
+                                "mdm-flickr-256",
+                                "mdm-flickr-1024",
                             ],
-                            value="vis_model_64x64.pth",
-                            label="Load checkpoint",
+                            value="mdm-flickr-64",
+                            label="Model",
                         )
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1):
@@ -363,7 +367,7 @@ def main(args):
                         )
                     with gr.Column(scale=1):
                         batch_size = gr.Slider(
-                            value=16, minimum=1, maximum=128, step=1, label="Batch size"
+                            value=64, minimum=1, maximum=128, step=1, label="Number of images"
                         )
 
         with gr.Row(equal_height=False):
@@ -488,7 +492,6 @@ def main(args):
         run_event = run_btn.click(
             fn=generate,
             inputs=[
-                config_file,
                 ckpt_name,
                 prompt_input,
                 input_template,
@@ -526,11 +529,11 @@ def main(args):
         )
         example0 = gr.Examples(
             [
-                ["cc12m_64x64.yaml", "vis_model_64x64.pth", 64, 50, 0],
-                ["cc12m_256x256.yaml", "vis_model_256x256.pth", 16, 100, 0],
-                ["cc12m_1024x1024.yaml", "vis_model_1024x1024.pth", 4, 250, 1],
+                ["mdm-flickr-64", 64, 50, 0],
+                ["mdm-flickr-256", 16, 100, 0],
+                ["mdm-flickr-1024", 4, 250, 1],
             ],
-            inputs=[config_file, ckpt_name, batch_size, num_inference_steps, eta],
+            inputs=[ckpt_name, batch_size, num_inference_steps, eta],
         )
         example1 = gr.Examples(
             examples=[[t.strip()] for t in example_texts],
